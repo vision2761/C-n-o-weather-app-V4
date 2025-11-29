@@ -21,6 +21,7 @@ from rain_analysis_V4 import (
     analyze_rain_events,
     plot_rain_events,
     plot_rain_runway_timeline,
+    split_wet_runway_episodes,   # ✅ 新增
 )
 
 st.set_page_config(page_title="昆岛机场气象&跑道记录系统 V4", layout="wide")
@@ -246,7 +247,7 @@ def page_rain_runway():
         ],
         key="rw_state",
     )
-    rw_note = st.text_input("跑道备注（可选，如 T/O 滑跑明显）", key="rw_note")
+    rw_note = st.text输入 = st.text_input("跑道备注（可选，如 T/O 滑跑明显）", key="rw_note")
 
     if st.button("保存跑道状态记录"):
         if not rw_time_str:
@@ -291,11 +292,24 @@ def page_rain_runway():
             df_rw = pd.DataFrame(columns=["时间", "跑道状态"])
             st.info("该时间段无跑道状态记录")
 
-        # 时间轴图
+        # ① 整体时间轴
         if not df_rain.empty or not df_rw.empty:
-            st.subheader("🕒 降水 & 跑道干湿状态时间轴")
-            fig = plot_rain_runway_timeline(df_rain, df_rw)
-            st.pyplot(fig)
+            st.subheader("🕒 降水 & 跑道干湿状态时间轴（整体）")
+            fig_all = plot_rain_runway_timeline(df_rain, df_rw)
+            st.pyplot(fig_all)
+
+            # ② 按“湿跑道过程”拆分，多张图展示
+            episodes = split_wet_runway_episodes(df_rain, df_rw)
+            if episodes:
+                st.subheader("🌧 各次湿跑道过程（分图显示）")
+                for idx, ep in enumerate(episodes, start=1):
+                    start_t = ep["start"].strftime("%Y-%m-%d %H:%M") if ep["start"] else "?"
+                    end_t = ep["end"].strftime("%H:%M") if ep["end"] else "?"
+                    st.markdown(f"**湿跑道过程 {idx}：{start_t} ~ {end_t}**")
+                    fig_ep = plot_rain_runway_timeline(ep["rain_df"], ep["runway_df"])
+                    st.pyplot(fig_ep)
+            else:
+                st.info("尚未形成完整的湿跑道过程（可能缺少“跑道恢复干”的记录）。")
         else:
             st.info("无可绘制的时间轴数据")
 
