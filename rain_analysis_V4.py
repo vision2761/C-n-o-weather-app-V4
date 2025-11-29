@@ -5,25 +5,77 @@
 #   plot_rain_runway_timeline：降水 & 跑道干湿时间轴
 #   split_wet_runway_episodes：按“湿跑道过程”拆成多段（给多张图用）
 
+import os
+from urllib.request import urlopen
+
 import matplotlib.pyplot as plt
 import pandas as pd
-from matplotlib.font_manager import FontProperties
+from matplotlib.font_manager import FontProperties, fontManager
 
 # ================================
-# 中文字体（尽量避免乱码）
+# 自动获取中文字体（优先下载 Noto Sans SC）
 # ================================
-try:
-    # 本地开发（Mac）优先用系统黑体
-    CH_FONT = FontProperties(fname="/System/Library/Fonts/STHeiti Medium.ttc")
+FONT_CACHE_PATH = "/tmp/NotoSansSC-Regular.otf"
+FONT_URL = (
+    "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/"
+    "SimplifiedChinese/NotoSansSC-Regular.otf"
+)
+
+
+def get_chinese_font():
+    """
+    优先使用 /tmp 下缓存的 Noto Sans SC；
+    若不存在则尝试从 GitHub 下载；
+    如果下载失败，再去系统字体里摸一个常见的中文字体；
+    实在不行就返回 None（中文会变方块，但程序不会崩）。
+    """
+    # 1) 之前已经下载过，直接用缓存
+    if os.path.exists(FONT_CACHE_PATH):
+        try:
+            return FontProperties(fname=FONT_CACHE_PATH)
+        except Exception:
+            pass
+
+    # 2) 尝试从网上下载 Noto Sans SC
+    try:
+        with urlopen(FONT_URL, timeout=10) as r:
+            data = r.read()
+        with open(FONT_CACHE_PATH, "wb") as f:
+            f.write(data)
+        return FontProperties(fname=FONT_CACHE_PATH)
+    except Exception:
+        pass  # 下载失败就继续往下走
+
+    # 3) 在系统字体里找常见中文字体
+    try:
+        prefer_names = [
+            "SimHei",
+            "Microsoft YaHei",
+            "SimSun",
+            "Noto Sans CJK",
+            "WenQuanYi",
+        ]
+        for f in fontManager.ttflist:
+            if any(name in f.name for name in prefer_names):
+                return FontProperties(fname=f.fname)
+    except Exception:
+        pass
+
+    # 4) 实在没办法
+    return None
+
+
+CH_FONT = get_chinese_font()
+
+if CH_FONT is not None:
     plt.rcParams["font.family"] = CH_FONT.get_name()
-except Exception:
-    CH_FONT = None
-    plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS"]
+else:
+    # 没找到中文字体，就用默认英文字体（中文还是会是方块）
+    plt.rcParams["font.family"] = "DejaVu Sans"
 
 plt.rcParams["axes.unicode_minus"] = False  # 负号不乱码
 
-# 用于 ax.text(...) 的字体参数
+# 给 ax.text / ax.set_title 等用的统一参数
 TEXT_KW = {"fontproperties": CH_FONT} if CH_FONT is not None else {}
 
 # ================================
@@ -39,16 +91,18 @@ RAIN_LEVEL_MAP = {
     "雷阵雨": 3.5,
 }
 
-# ---------------- 工具函数：跑道状态是否“干” ----------------
+
+# ---------------- 工具函数：跑道状态是否“干/湿” ----------------
 def is_runway_dry_state(state: str) -> bool:
     return state in ["跑道干", "跑道恢复干"]
+
 
 def is_runway_wet_state(state: str) -> bool:
     return state in ["跑道湿", "跑道大部湿（仍视为干跑道）"]
 
 
 # ---------------------------------------------------------
-# 自动按“雨停”把降水记录分成多个降水事件（只看降水）
+# 自动分段：把连续降水记录合并成降水事件（按“雨停”切分）
 # ---------------------------------------------------------
 def analyze_rain_events(df: pd.DataFrame):
     """
@@ -126,8 +180,8 @@ def plot_rain_events(events):
             label=f"事件 {idx+1}",
         )
 
-    ax.set_ylabel("降水强度等级", fontsize=12)
-    ax.set_title("降水事件强度随时间变化", fontsize=14)
+    ax.set_ylabel("降水强度等级", fontsize=12, **TEXT_KW)
+    ax.set_title("降水事件强度随时间变化", fontsize=14, **TEXT_KW)
 
     ax.grid(True, linestyle="--", alpha=0.6)
     plt.xticks(rotation=45, ha="right")
@@ -190,11 +244,11 @@ def plot_rain_runway_timeline(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
             )
 
     ax.set_yticks([0, 1])
-    ax.set_yticklabels(["跑道状态", "降水"], fontsize=11)
+    ax.set_yticklabels(["跑道状态", "降水"], fontsize=11, **TEXT_KW)
     ax.set_ylim(-0.6, 1.6)
 
-    ax.set_xlabel("时间", fontsize=12)
-    ax.set_title("降水与跑道干湿状态时间轴", fontsize=14)
+    ax.set_xlabel("时间", fontsize=12, **TEXT_KW)
+    ax.set_title("降水与跑道干湿状态时间轴", fontsize=14, **TEXT_KW)
 
     ax.grid(True, axis="x", linestyle="--", alpha=0.5)
     plt.xticks(rotation=45, ha="right")
@@ -207,12 +261,16 @@ def plot_rain_runway_timeline(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
 # 按“湿跑道过程”拆分成多段
 # 规则：
 #   - 第一次出现“有雨”（雨强 ≠ 雨停）且当前不在过程内 → 开始一个新的湿跑道过程
-#   - 期间可能多次“雨停”、“再次下雨”，只要跑道没恢复干，都视作同一过程
+#   - 期间可以多次“雨停 / 再次下雨”，只要跑道没恢复干，都视作同一过程
 #   - 当跑道状态记录为“跑道干 / 跑道恢复干” → 该湿跑道过程结束
 #   - 下次再有雨时，再开一个新的过程
 # ---------------------------------------------------------
-def split_wet_runway_episodes(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
-    if (rain_df is None or rain_df.empty) and (runway_df is None or runway_df.empty):
+def split_wet_runway_episodes(
+    rain_df: pd.DataFrame, runway_df: pd.DataFrame
+):
+    if (rain_df is None or rain_df.empty) and (
+        runway_df is None or runway_df.empty
+    ):
         return []
 
     # 拷贝 & 排序
@@ -228,7 +286,11 @@ def split_wet_runway_episodes(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
         events.append({"时间": r["时间"], "kind": "rain", "雨强": r["雨强"]})
     for _, r in rw_df.iterrows():
         events.append(
-            {"时间": r["时间"], "kind": "runway", "跑道状态": r["跑道状态"]}
+            {
+                "时间": r["时间"],
+                "kind": "runway",
+                "跑道状态": r["跑道状态"],
+            }
         )
 
     timeline = pd.DataFrame(events).sort_values("时间")
@@ -275,8 +337,16 @@ def split_wet_runway_episodes(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
 
                 if is_runway_dry_state(state):
                     # 跑道恢复干 → 本次湿跑道过程结束
-                    ep_rain_df = pd.DataFrame(rain_records) if rain_records else pd.DataFrame(columns=["时间","雨强"])
-                    ep_rw_df = pd.DataFrame(runway_records) if runway_records else pd.DataFrame(columns=["时间","跑道状态"])
+                    ep_rain_df = (
+                        pd.DataFrame(rain_records)
+                        if rain_records
+                        else pd.DataFrame(columns=["时间", "雨强"])
+                    )
+                    ep_rw_df = (
+                        pd.DataFrame(runway_records)
+                        if runway_records
+                        else pd.DataFrame(columns=["时间", "跑道状态"])
+                    )
                     episodes.append(
                         {
                             "start": start_time,
@@ -296,8 +366,16 @@ def split_wet_runway_episodes(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
 
     # 如果最后还在过程里（还没恢复干），也输出一段
     if in_episode and (rain_records or runway_records):
-        ep_rain_df = pd.DataFrame(rain_records) if rain_records else pd.DataFrame(columns=["时间","雨强"])
-        ep_rw_df = pd.DataFrame(runway_records) if runway_records else pd.DataFrame(columns=["时间","跑道状态"])
+        ep_rain_df = (
+            pd.DataFrame(rain_records)
+            if rain_records
+            else pd.DataFrame(columns=["时间", "雨强"])
+        )
+        ep_rw_df = (
+            pd.DataFrame(runway_records)
+            if runway_records
+            else pd.DataFrame(columns=["时间", "跑道状态"])
+        )
         episodes.append(
             {
                 "start": start_time,
