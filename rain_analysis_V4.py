@@ -3,6 +3,7 @@
 #   analyze_rain_events：自动按“雨停”分段
 #   plot_rain_events：降水事件强度随时间
 #   plot_rain_runway_timeline：降水 & 跑道干湿时间轴
+#   split_wet_runway_episodes：按“湿跑道过程”拆成多段（给多张图用）
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -12,13 +13,18 @@ from matplotlib.font_manager import FontProperties
 # 中文字体（尽量避免乱码）
 # ================================
 try:
-    font = FontProperties(fname="/System/Library/Fonts/STHeiti Medium.ttc")  # macOS
-    plt.rcParams["font.family"] = font.get_name()
+    # 本地开发（Mac）优先用系统黑体
+    CH_FONT = FontProperties(fname="/System/Library/Fonts/STHeiti Medium.ttc")
+    plt.rcParams["font.family"] = CH_FONT.get_name()
 except Exception:
+    CH_FONT = None
     plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = ["SimHei", "Arial Unicode MS"]
+    plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS"]
 
 plt.rcParams["axes.unicode_minus"] = False  # 负号不乱码
+
+# 用于 ax.text(...) 的字体参数
+TEXT_KW = {"fontproperties": CH_FONT} if CH_FONT is not None else {}
 
 # ================================
 # 雨强 → 数值映射
@@ -33,9 +39,16 @@ RAIN_LEVEL_MAP = {
     "雷阵雨": 3.5,
 }
 
+# ---------------- 工具函数：跑道状态是否“干” ----------------
+def is_runway_dry_state(state: str) -> bool:
+    return state in ["跑道干", "跑道恢复干"]
+
+def is_runway_wet_state(state: str) -> bool:
+    return state in ["跑道湿", "跑道大部湿（仍视为干跑道）"]
+
 
 # ---------------------------------------------------------
-# 自动分段：把连续降水记录合并成降水事件
+# 自动按“雨停”把降水记录分成多个降水事件（只看降水）
 # ---------------------------------------------------------
 def analyze_rain_events(df: pd.DataFrame):
     """
@@ -125,7 +138,7 @@ def plot_rain_events(events):
 
 
 # ---------------------------------------------------------
-# 降水 + 跑道状态 时间轴
+# 降水 + 跑道状态 时间轴（整体用）
 # ---------------------------------------------------------
 def plot_rain_runway_timeline(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
     """
@@ -152,6 +165,7 @@ def plot_rain_runway_timeline(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
                 ha="left",
                 va="bottom",
                 fontsize=8,
+                **TEXT_KW,
             )
 
     # 跑道：y = 0
@@ -172,6 +186,7 @@ def plot_rain_runway_timeline(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
                 ha="right",
                 va="top",
                 fontsize=8,
+                **TEXT_KW,
             )
 
     ax.set_yticks([0, 1])
@@ -186,3 +201,110 @@ def plot_rain_runway_timeline(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
     plt.tight_layout()
 
     return fig
+
+
+# ---------------------------------------------------------
+# 按“湿跑道过程”拆分成多段
+# 规则：
+#   - 第一次出现“有雨”（雨强 ≠ 雨停）且当前不在过程内 → 开始一个新的湿跑道过程
+#   - 期间可能多次“雨停”、“再次下雨”，只要跑道没恢复干，都视作同一过程
+#   - 当跑道状态记录为“跑道干 / 跑道恢复干” → 该湿跑道过程结束
+#   - 下次再有雨时，再开一个新的过程
+# ---------------------------------------------------------
+def split_wet_runway_episodes(rain_df: pd.DataFrame, runway_df: pd.DataFrame):
+    if (rain_df is None or rain_df.empty) and (runway_df is None or runway_df.empty):
+        return []
+
+    # 拷贝 & 排序
+    r_df = rain_df.copy()
+    rw_df = runway_df.copy()
+    r_df = r_df.sort_values("时间")
+    rw_df = rw_df.sort_values("时间")
+
+    events = []
+
+    # 合并时间线：kind = rain / runway
+    for _, r in r_df.iterrows():
+        events.append({"时间": r["时间"], "kind": "rain", "雨强": r["雨强"]})
+    for _, r in rw_df.iterrows():
+        events.append(
+            {"时间": r["时间"], "kind": "runway", "跑道状态": r["跑道状态"]}
+        )
+
+    timeline = pd.DataFrame(events).sort_values("时间")
+
+    episodes = []
+    in_episode = False
+    rain_records = []
+    runway_records = []
+    start_time = None
+    end_time = None
+
+    for _, ev in timeline.iterrows():
+        kind = ev["kind"]
+
+        # ===== 降水事件 =====
+        if kind == "rain":
+            level = ev["雨强"]
+            t = ev["时间"]
+
+            if level != "雨停":
+                # 有雨
+                if not in_episode:
+                    # 新开一个湿跑道过程
+                    in_episode = True
+                    rain_records = []
+                    runway_records = []
+                    start_time = t
+                rain_records.append({"时间": t, "雨强": level})
+                end_time = t
+            else:
+                # 雨停
+                if in_episode:
+                    rain_records.append({"时间": t, "雨强": level})
+                    end_time = t
+
+        # ===== 跑道事件 =====
+        else:
+            state = ev["跑道状态"]
+            t = ev["时间"]
+
+            if in_episode:
+                runway_records.append({"时间": t, "跑道状态": state})
+                end_time = t
+
+                if is_runway_dry_state(state):
+                    # 跑道恢复干 → 本次湿跑道过程结束
+                    ep_rain_df = pd.DataFrame(rain_records) if rain_records else pd.DataFrame(columns=["时间","雨强"])
+                    ep_rw_df = pd.DataFrame(runway_records) if runway_records else pd.DataFrame(columns=["时间","跑道状态"])
+                    episodes.append(
+                        {
+                            "start": start_time,
+                            "end": end_time,
+                            "rain_df": ep_rain_df,
+                            "runway_df": ep_rw_df,
+                        }
+                    )
+                    in_episode = False
+                    rain_records = []
+                    runway_records = []
+                    start_time = None
+                    end_time = None
+            else:
+                # 不在湿跑道过程中，跑道状态只作为背景，不计入任何过程
+                pass
+
+    # 如果最后还在过程里（还没恢复干），也输出一段
+    if in_episode and (rain_records or runway_records):
+        ep_rain_df = pd.DataFrame(rain_records) if rain_records else pd.DataFrame(columns=["时间","雨强"])
+        ep_rw_df = pd.DataFrame(runway_records) if runway_records else pd.DataFrame(columns=["时间","跑道状态"])
+        episodes.append(
+            {
+                "start": start_time,
+                "end": end_time,
+                "rain_df": ep_rain_df,
+                "runway_df": ep_rw_df,
+            }
+        )
+
+    return episodes
